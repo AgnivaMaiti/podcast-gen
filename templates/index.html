@@ -198,36 +198,108 @@
             }
         }
         
-        // Initialize FFmpeg
-        const { createFFmpeg, fetchFile } = FFmpeg;
-        const ffmpeg = createFFmpeg({ log: true });
+        // Initialize FFmpeg with SharedArrayBuffer support check
+        let ffmpeg = null;
         let isFFmpegLoaded = false;
+        let isFFmpegSupported = false; // Default to false, we'll check properly below
+        
+        try {
+            // Only try to initialize FFmpeg if SharedArrayBuffer is available
+            if (typeof SharedArrayBuffer !== 'undefined') {
+                const { createFFmpeg } = FFmpeg;
+                ffmpeg = createFFmpeg({ 
+                    log: true,
+                    corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+                });
+                isFFmpegSupported = true;
+            } else {
+                console.warn('SharedArrayBuffer not available. Using direct WAV download.');
+            }
+        } catch (error) {
+            console.error('Failed to initialize FFmpeg:', error);
+            isFFmpegSupported = false;
+        }
         
         async function loadFFmpeg() {
-            if (!isFFmpegLoaded) {
-                document.getElementById('statusText').textContent = 'Loading audio tools...';
-                await ffmpeg.load();
-                isFFmpegLoaded = true;
+            if (!isFFmpegSupported) {
+                throw new Error('Your browser does not support required features for MP3 conversion. Downloading WAV instead.');
+            }
+            
+            if (!isFFmpegLoaded && ffmpeg) {
+                try {
+                    document.getElementById('statusText').textContent = 'Loading audio tools...';
+                    await ffmpeg.load();
+                    isFFmpegLoaded = true;
+                } catch (error) {
+                    console.error('Failed to load FFmpeg:', error);
+                    isFFmpegSupported = false;
+                    throw new Error('Failed to load audio tools. Downloading WAV instead.');
+                }
+            }
+            return isFFmpegLoaded;
+        }
+        
+        function hexToBytes(hex) {
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes.buffer;
+        }
+        
+        function downloadWavData(wavData, filename) {
+            try {
+                // Convert hex string to bytes
+                const byteArray = hexToBytes(wavData);
+                
+                // Create blob and download link
+                const blob = new Blob([byteArray], { type: 'audio/wav' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename.endsWith('.mp3') ? 
+                    filename.replace('.mp3', '.wav') : 
+                    (filename.endsWith('.wav') ? filename : filename + '.wav');
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                return true;
+            } catch (error) {
+                console.error('Error downloading WAV:', error);
+                return false;
             }
         }
         
         async function convertWavToMp3(wavData) {
-            try {
+            if (!isFFmpegSupported) {
+                throw new Error('FFmpeg not supported in this browser');
+            }
+            
+            if (!isFFmpegLoaded) {
                 await loadFFmpeg();
-                const inputName = 'input.wav';
-                const outputName = 'output.mp3';
+            }
+            
+            const inputName = 'input.wav';
+            const outputName = 'output.mp3';
+            
+            try {
+                // Convert hex string to ArrayBuffer
+                const byteArray = hexToBytes(wavData);
                 
-                // Write the WAV file to FFmpeg's virtual filesystem
-                ffmpeg.FS('writeFile', inputName, await fetchFile(new Blob([wavData], { type: 'audio/wav' })));
+                // Write the WAV data to FFmpeg's virtual filesystem
+                ffmpeg.FS('writeFile', inputName, new Uint8Array(byteArray));
                 
-                // Run FFmpeg command to convert WAV to MP3
-                await ffmpeg.run('-i', inputName, '-codec:a', 'libmp3lame', '-qscale:a', '2', outputName);
+                // Convert to MP3
+                await ffmpeg.run(
+                    '-i', inputName,
+                    '-codec:a', 'libmp3lame',
+                    '-qscale:a', '2',
+                    outputName
+                );
                 
                 // Read the result
                 const data = ffmpeg.FS('readFile', outputName);
-                
-                // Clean up
-                ffmpeg.FS('unlink', inputName);
                 ffmpeg.FS('unlink', outputName);
                 
                 return new Blob([data.buffer], { type: 'audio/mp3' });

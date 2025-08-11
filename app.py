@@ -364,27 +364,58 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
         try:
-            if IS_VERCEL:
-                # In Vercel, we'll handle the audio conversion in the frontend using FFmpeg.wasm
-                # Save the audio as WAV (uncompressed) for better quality when sending to frontend
-                temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-                final_audio.export(temp_wav.name, format="wav")
-                with open(temp_wav.name, 'rb') as f:
-                    wav_data = f.read()
-                os.unlink(temp_wav.name)
-                processing_status[task_id]['wav_data'] = wav_data.hex()
-                processing_status[task_id]['output_filename'] = f"StudySauce_Podcast_{timestamp}.mp3"
-            else:
-                # Local development with system FFmpeg
-                final_audio.export(output_path, format="mp3")
+            # Always generate WAV data for both Vercel and local development
+            # This ensures consistent behavior across environments
+            with io.BytesIO() as wav_buffer:
+                # Export as WAV format (uncompressed for best quality)
+                final_audio.export(wav_buffer, format="wav")
+                wav_data = wav_buffer.getvalue()
+            
+            # Store WAV data in memory for the download endpoint
+            processing_status[task_id]['wav_data'] = wav_data.hex()
+            processing_status[task_id]['filename'] = output_filename
+            
+            # In non-Vercel environments, also save the MP3 file locally
+            if not IS_VERCEL:
+                try:
+                    final_audio.export(output_path, format="mp3")
+                    processing_status[task_id]['download_url'] = f'/download/{output_filename}'
+                except Exception as mp3_error:
+                    print(f"MP3 export failed, falling back to WAV: {mp3_error}")
+                    # If MP3 export fails, fall back to WAV
+                    output_filename = output_filename.replace('.mp3', '.wav')
+                    output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+                    with open(output_path, 'wb') as f:
+                        f.write(wav_data)
+                    processing_status[task_id]['filename'] = output_filename
+                    processing_status[task_id]['download_url'] = f'/download/{output_filename}'
+            
+            # Update status to complete
+            processing_status[task_id]['status'] = 'Complete!'
+            processing_status[task_id]['progress'] = 100
+            
         except Exception as e:
             error_msg = str(e)
-            if "ffmpeg" in error_msg.lower():
-                error_msg = "FFmpeg is required for audio conversion. Please install FFmpeg and add it to your system PATH."
-            processing_status[task_id]['status'] = f'Error: {error_msg}'
-            processing_status[task_id]['progress'] = 0
-            processing_status[task_id]['error'] = True
-            return
+            print(f"Error finalizing podcast: {error_msg}")
+            if "ffmpeg" in error_msg.lower() or "encoder" in error_msg.lower():
+                error_msg = "Error during audio processing. The system will attempt to use WAV format instead."
+            
+            # Try to save as WAV as a last resort
+            try:
+                with io.BytesIO() as wav_buffer:
+                    final_audio.export(wav_buffer, format="wav")
+                    wav_data = wav_buffer.getvalue()
+                processing_status[task_id]['wav_data'] = wav_data.hex()
+                output_filename = f"StudySauce_Podcast_{timestamp}.wav"
+                processing_status[task_id]['filename'] = output_filename
+                processing_status[task_id]['status'] = 'Complete! (WAV format)'
+                processing_status[task_id]['progress'] = 100
+                print("Successfully saved as WAV after initial error")
+            except Exception as wav_error:
+                print(f"WAV export also failed: {wav_error}")
+                processing_status[task_id]['status'] = f'Error: {error_msg}'
+                processing_status[task_id]['progress'] = 0
+                processing_status[task_id]['error'] = True
         
         processing_status[task_id]['status'] = 'Complete!'
         processing_status[task_id]['progress'] = 100
@@ -466,25 +497,42 @@ def get_status(task_id):
         print("Task not found")
         return jsonify({'error': 'Task not found'}), 404
 
-@app.route('/download/<identifier>')
+@app.route('/download/<identifier>', methods=['GET'])
 def download_file(identifier):
     try:
+        # Check if this is a task ID with associated file
         if identifier in processing_status and 'filename' in processing_status[identifier]:
             filename = processing_status[identifier]['filename']
+            filepath = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+            
+            # If we have WAV data in memory, use that instead of the file
+            if 'wav_data' in processing_status[identifier]:
+                print(f"Serving WAV data from memory for task {identifier}")
+                wav_data = processing_status[identifier]['wav_data']
+                return jsonify({
+                    'wav_data': wav_data.hex(),
+                    'filename': filename.replace('.mp3', '.wav')
+                })
         else:
+            # Direct file access by filename
             filename = identifier
-        
-        filepath = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+            filepath = os.path.join(app.config['OUTPUT_FOLDER'], filename)
         
         if not os.path.exists(filepath):
             return jsonify({'error': 'File not found'}), 404
-            
+        
+        # Determine MIME type based on file extension
+        _, ext = os.path.splitext(filename.lower())
+        mimetype = 'audio/mpeg' if ext == '.mp3' else 'audio/wav'
+        
+        # For direct file downloads
         return send_file(
-            filepath, 
-            as_attachment=True, 
+            filepath,
+            as_attachment=True,
             download_name=filename,
-            mimetype='audio/mpeg'
+            mimetype=mimetype
         )
+        
     except Exception as e:
         print(f"Download error: {e}")
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
