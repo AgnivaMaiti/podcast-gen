@@ -5,7 +5,7 @@
   "main": "app.py",
   "scripts": {
     "start": "python app.py",
-    "vercel-build": "pip install -r requirements.txt && python -c \"import nltk; nltk.download('punkt')\""
+    "vercel-build": "python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -c \"import nltk; nltk.download('punkt')\""
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
