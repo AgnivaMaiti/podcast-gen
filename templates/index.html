@@ -200,6 +200,14 @@
         async function pollStatus(taskId) {
             try {
                 const response = await fetch(`/status/${taskId}`);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        throw new Error('Session expired. Please refresh the page and try again.');
+                    }
+                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                }
+                
                 const data = await response.json();
                 
                 // Update progress
@@ -231,7 +239,25 @@
                 
             } catch (error) {
                 console.error('Error polling status:', error);
-                document.getElementById('statusText').textContent = 'Error: ' + (error.message || 'Failed to check status');
+                const statusElement = document.getElementById('statusText');
+                if (statusElement) {
+                    statusElement.textContent = 'Error: ' + (error.message || 'Failed to check status');
+                    statusElement.style.color = '#ef4444'; // Red color for error
+                }
+                
+                // Show retry button
+                const retryButton = document.createElement('button');
+                retryButton.className = 'btn';
+                retryButton.style.marginTop = '1rem';
+                retryButton.innerHTML = 'Retry';
+                retryButton.onclick = () => {
+                    window.location.reload();
+                };
+                
+                const progressSection = document.getElementById('progressSection');
+                if (progressSection) {
+                    progressSection.appendChild(retryButton);
+                }
             }
         }
         
