@@ -418,9 +418,16 @@ def upload_file():
 
 @app.route('/status/<task_id>')
 def get_status(task_id):
+    print(f"\n=== Status Request ===")
+    print(f"Task ID: {task_id}")
+    print(f"Available tasks: {list(processing_status.keys())}")
+    
     if task_id in processing_status:
-        return jsonify(processing_status[task_id])
+        status = processing_status[task_id]
+        print(f"Status: {status}")
+        return jsonify(status)
     else:
+        print("Task not found")
         return jsonify({'error': 'Task not found'}), 404
 
 @app.route('/download/<identifier>')

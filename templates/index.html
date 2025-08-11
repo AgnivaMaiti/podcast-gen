@@ -199,16 +199,24 @@
         
         async function pollStatus(taskId) {
             try {
+                console.log(`Polling status for task: ${taskId}`);
                 const response = await fetch(`/status/${taskId}`);
                 
+                // Log raw response for debugging
+                console.log('Response status:', response.status, response.statusText);
+                
                 if (!response.ok) {
+                    let errorText = await response.text();
+                    console.error('Error response:', errorText);
+                    
                     if (response.status === 404) {
                         throw new Error('Session expired. Please refresh the page and try again.');
                     }
-                    throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                    throw new Error(`Server returned ${response.status}: ${response.statusText} - ${errorText}`);
                 }
                 
                 const data = await response.json();
+                console.log('Status data:', JSON.stringify(data, null, 2));
                 
                 // Update progress
                 const progress = data.progress || 0;
