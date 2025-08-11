@@ -41,8 +41,14 @@ ENV/
 .DS_Store
 
 # Local development
-uploads/
-output/
+/uploads/
+/output/
+
+# Ignore all files in uploads and output directories
+/uploads/*
+!/uploads/.gitkeep
+/output/*
+!/output/.gitkeep
 
 # Logs
 *.log
