@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>StudySauce - PDF to Podcast</title>
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -197,6 +198,48 @@
             }
         }
         
+        // Initialize FFmpeg
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        const ffmpeg = createFFmpeg({ log: true });
+        let isFFmpegLoaded = false;
+        
+        async function loadFFmpeg() {
+            if (!isFFmpegLoaded) {
+                document.getElementById('statusText').textContent = 'Loading audio tools...';
+                await ffmpeg.load();
+                isFFmpegLoaded = true;
+            }
+        }
+        
+        async function convertWavToMp3(wavData) {
+            try {
+                await loadFFmpeg();
+                const inputName = 'input.wav';
+                const outputName = 'output.mp3';
+                
+                // Write the WAV file to FFmpeg's virtual filesystem
+                ffmpeg.FS('writeFile', inputName, await fetchFile(new Blob([wavData], { type: 'audio/wav' })));
+                
+                // Run FFmpeg command to convert WAV to MP3
+                await ffmpeg.run('-i', inputName, '-codec:a', 'libmp3lame', '-qscale:a', '2', outputName);
+                
+                // Read the result
+                const data = ffmpeg.FS('readFile', outputName);
+                
+                // Clean up
+                ffmpeg.FS('unlink', inputName);
+                ffmpeg.FS('unlink', outputName);
+                
+                return new Blob([data.buffer], { type: 'audio/mp3' });
+            } catch (error) {
+                console.error('Error converting audio:', error);
+                throw error;
+            }
+        }
+        
+        // Start loading FFmpeg in the background
+        loadFFmpeg().catch(console.error);
+
         async function pollStatus(taskId) {
             try {
                 console.log(`Polling status for task: ${taskId}`);
@@ -249,7 +292,14 @@
                 console.error('Error polling status:', error);
                 const statusElement = document.getElementById('statusText');
                 if (statusElement) {
-                    statusElement.textContent = 'Error: ' + (error.message || 'Failed to check status');
+                    let errorMessage = error.message || 'Failed to check status';
+                    
+                    // Special handling for FFmpeg errors
+                    if (errorMessage.includes('FFmpeg') || errorMessage.includes('ffmpeg')) {
+                        errorMessage = 'FFmpeg is required for audio processing. Please install FFmpeg and restart the application.';
+                    }
+                    
+                    statusElement.textContent = 'Error: ' + errorMessage;
                     statusElement.style.color = '#ef4444'; // Red color for error
                 }
                 

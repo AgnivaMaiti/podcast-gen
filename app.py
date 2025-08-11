@@ -8,7 +8,15 @@ import io
 import tempfile
 from datetime import datetime
 import fitz 
+import sys
+import platform
+import subprocess
+import tempfile
+import shutil
 from pydub import AudioSegment
+
+# Check if running in Vercel
+IS_VERCEL = os.environ.get('VERCEL') == '1'
 from dotenv import load_dotenv
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -23,6 +31,13 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+# Configure FFmpeg path if on Windows and not in Vercel
+if platform.system() == 'Windows' and not IS_VERCEL:
+    import os
+    ffmpeg_path = shutil.which('ffmpeg')
+    if ffmpeg_path:
+        os.environ["PATH"] += os.pathsep + os.path.dirname(ffmpeg_path)
 
 # Use /tmp for serverless environments
 UPLOAD_FOLDER = '/tmp/uploads' if os.environ.get('VERCEL') else 'uploads'
@@ -348,7 +363,28 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         output_filename = f"StudySauce_Podcast_{timestamp}.mp3"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
-        final_audio.export(output_path, format="mp3")
+        try:
+            if IS_VERCEL:
+                # In Vercel, we'll handle the audio conversion in the frontend using FFmpeg.wasm
+                # Save the audio as WAV (uncompressed) for better quality when sending to frontend
+                temp_wav = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+                final_audio.export(temp_wav.name, format="wav")
+                with open(temp_wav.name, 'rb') as f:
+                    wav_data = f.read()
+                os.unlink(temp_wav.name)
+                processing_status[task_id]['wav_data'] = wav_data.hex()
+                processing_status[task_id]['output_filename'] = f"StudySauce_Podcast_{timestamp}.mp3"
+            else:
+                # Local development with system FFmpeg
+                final_audio.export(output_path, format="mp3")
+        except Exception as e:
+            error_msg = str(e)
+            if "ffmpeg" in error_msg.lower():
+                error_msg = "FFmpeg is required for audio conversion. Please install FFmpeg and add it to your system PATH."
+            processing_status[task_id]['status'] = f'Error: {error_msg}'
+            processing_status[task_id]['progress'] = 0
+            processing_status[task_id]['error'] = True
+            return
         
         processing_status[task_id]['status'] = 'Complete!'
         processing_status[task_id]['progress'] = 100
