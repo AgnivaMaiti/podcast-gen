@@ -99,7 +99,7 @@ if not GEMINI_API_KEY or not ELEVENLABS_API_KEY:
     raise ValueError("API keys not found. Please check your .env file")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
 eleven_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 NUM_HOSTS = 2
