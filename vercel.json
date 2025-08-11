@@ -8,8 +8,17 @@
         "maxLambdaSize": "15mb",
         "includeFiles": ["templates/**", "uploads/**", "output/**"]
       }
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "static"
+      }
     }
   ],
+  "buildCommand": "npm install && npm install @ffmpeg-installer/ffmpeg @ffprobe-installer/ffprobe",
+  "installCommand": "pip install -r requirements.txt && npm install",
   "routes": [
     {
       "src": "/(.*)",

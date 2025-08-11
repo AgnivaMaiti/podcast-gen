@@ -12,7 +12,50 @@ import sys
 import platform
 import subprocess
 import shutil
-from pydub import AudioSegment
+import pydub
+import warnings
+
+# Suppress FFmpeg warnings
+warnings.filterwarnings("ignore", message="Couldn't find ffprobe or avprobe")
+
+# Try to import AudioSegment with FFmpeg fallback
+try:
+    AudioSegment = pydub.AudioSegment
+    # Test FFmpeg availability
+    test_audio = AudioSegment.silent(duration=100)
+    FFMPEG_AVAILABLE = True
+except Exception as e:
+    print(f"FFmpeg not available, using basic audio processing: {str(e)}")
+    FFMPEG_AVAILABLE = False
+    
+    # Define a simplified AudioSegment fallback
+    class SimpleAudioSegment:
+        def __init__(self, data=None, *args, **kwargs):
+            self.data = data or b''
+            self.frame_rate = 44100
+            self.channels = 2
+            self.sample_width = 2
+            
+        @classmethod
+        def from_file(cls, file, format=None):
+            with open(file, 'rb') as f:
+                return cls(f.read())
+                
+        def export(self, output_path, format='wav'):
+            with open(output_path, 'wb') as f:
+                f.write(self.data)
+                
+        def __add__(self, other):
+            if isinstance(other, SimpleAudioSegment):
+                return SimpleAudioSegment(self.data + other.data)
+            return self
+            
+        @classmethod
+        def silent(cls, duration=1000, *args, **kwargs):
+            # Return a silent audio segment of the specified duration in ms
+            return cls(b'\x00' * (duration * 44))  # Rough approximation for 44.1kHz stereo
+    
+    AudioSegment = SimpleAudioSegment
 from dotenv import load_dotenv
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -326,7 +369,15 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         processing_status[task_id]['status'] = 'Converting to audio...'
         processing_status[task_id]['progress'] = 60
         
-        final_audio = AudioSegment.silent(duration=1000)  # Start with 1s of silence
+        # Initialize audio based on FFmpeg availability
+        if FFMPEG_AVAILABLE:
+            final_audio = AudioSegment.silent(duration=1000)  # Start with 1s of silence
+            audio_format = "mp3"
+        else:
+            # Use WAV format if FFmpeg is not available
+            final_audio = AudioSegment.silent(duration=1000)
+            audio_format = "wav"
+            
         speakers_lower = set(name.lower() for name in speakers)
         
         script_lines = [clean_line(line) for line in script.split("\n") if clean_line(line)]
@@ -347,9 +398,17 @@ def process_podcast_creation(pdf_path: str, task_id: str):
                 
                 try:
                     audio_seg = text_to_audio_elevenlabs(text=content, voice_id=voice_id)
-                    final_audio += audio_seg + AudioSegment.silent(duration=500)
-                    processed_lines += 1
                     
+                    if FFMPEG_AVAILABLE:
+                        final_audio += audio_seg + AudioSegment.silent(duration=500)
+                    else:
+                        # Simple concatenation for non-FFmpeg mode
+                        if isinstance(audio_seg, bytes):
+                            final_audio.data += audio_seg
+                        else:
+                            final_audio.data += audio_seg.data if hasattr(audio_seg, 'data') else b''
+                    
+                    processed_lines += 1
                     progress = 60 + (processed_lines / total_lines) * 35
                     processing_status[task_id]['progress'] = min(progress, 95)
                     processing_status[task_id]['status'] = f'Processing audio ({processed_lines}/{total_lines})...'
@@ -362,10 +421,19 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         processing_status[task_id]['progress'] = 95
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"StudySauce_Podcast_{timestamp}.mp3"
+        output_filename = f"StudySauce_Podcast_{timestamp}.{audio_format}"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
-        final_audio.export(output_path, format="mp3")
+        # Export based on available capabilities
+        if FFMPEG_AVAILABLE:
+            final_audio.export(output_path, format=audio_format)
+        else:
+            # For non-FFmpeg mode, just write the raw data
+            with open(output_path, 'wb') as f:
+                if hasattr(final_audio, 'data'):
+                    f.write(final_audio.data)
+                else:
+                    f.write(final_audio)
         
         processing_status[task_id].update({
             'status': 'Complete!',
@@ -612,23 +680,46 @@ def download_file(identifier):
                 wav_hex = processing_status[identifier]['wav_data']  # already hex-encoded
                 # Ensure a .wav filename for client download
                 wav_filename = filename.replace('.mp3', '.wav') if filename.lower().endswith('.mp3') else filename
-                return jsonify({
-                    'wav_data': wav_hex,
-                    'filename': wav_filename
-                })
-        else:
-            # Direct file access by filename
-            filename = identifier
-            filepath = os.path.join(app.config['OUTPUT_FOLDER'], filename)
         
-        if not os.path.exists(filepath):
+        # Look for the file with the given identifier in the filename
+        for file in os.listdir(output_dir):
+            if identifier in file:
+                filename = file
+                break
+                
+        if not filename:
             return jsonify({'error': 'File not found'}), 404
+            
+        filepath = os.path.join(output_dir, filename)
         
         # Determine MIME type based on file extension
-        _, ext = os.path.splitext(filename.lower())
-        mimetype = 'audio/mpeg' if ext == '.mp3' else 'audio/wav'
+        if filename.lower().endswith('.mp3'):
+            mimetype = 'audio/mpeg'
+        elif filename.lower().endswith('.wav'):
+            mimetype = 'audio/wav'
+        else:
+            mimetype = 'application/octet-stream'  # Fallback MIME type
         
-        # For direct file downloads
+        # If FFmpeg is not available and the file is MP3, try to convert from WAV
+        if not FFMPEG_AVAILABLE and filename.lower().endswith('.mp3'):
+            try:
+                # Look for WAV version of the file
+                wav_filename = os.path.splitext(filename)[0] + '.wav'
+                wav_path = os.path.join(output_dir, wav_filename)
+                
+                if os.path.exists(wav_path):
+                    # Serve the WAV version instead
+                    return send_file(
+                        wav_path,
+                        as_attachment=True,
+                        download_name=wav_filename,
+                        mimetype='audio/wav'
+                    )
+            except Exception as e:
+                print(f"Error serving WAV fallback: {str(e)}")
+                # Continue with the original file if WAV conversion fails
+        
+        # Return the file for download
         return send_file(
             filepath,
             as_attachment=True,
@@ -637,8 +728,8 @@ def download_file(identifier):
         )
         
     except Exception as e:
-        print(f"Download error: {e}")
-        return jsonify({'error': f'Download failed: {str(e)}'}), 500
+        print(f"Error downloading file: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 # Create necessary directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)

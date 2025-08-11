@@ -1,0 +1,16 @@
+{
+  "name": "studysauce-podcast-generator",
+  "version": "1.0.0",
+  "description": "Convert PDFs to podcasts using AI",
+  "main": "app.py",
+  "scripts": {
+    "start": "python app.py"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^1.0.12"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
