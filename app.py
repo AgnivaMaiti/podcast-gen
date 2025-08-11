@@ -24,8 +24,9 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_FOLDER = 'uploads'
-OUTPUT_FOLDER = 'output'
+# Use /tmp for serverless environments
+UPLOAD_FOLDER = '/tmp/uploads' if os.environ.get('VERCEL') else 'uploads'
+OUTPUT_FOLDER = '/tmp/output' if os.environ.get('VERCEL') else 'output'
 ALLOWED_EXTENSIONS = {'pdf'}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -680,10 +681,14 @@ def download_file(identifier):
         print(f"Download error: {e}")
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
 
+# Create necessary directories
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+
 if __name__ == '__main__':
     print("🎧 StudySauce Backend Starting...")
     print("📋 Make sure to set your API keys as environment variables:")
     print("   export GEMINI_API_KEY='your_gemini_key'")
     print("   export ELEVENLABS_API_KEY='your_elevenlabs_key'")
-    print("🌐 Server will be available at: http://localhost:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    print("\n🌐 Starting Flask server...")
+    app.run(debug=True, port=5000)
