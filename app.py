@@ -9,6 +9,7 @@ import tempfile
 from datetime import datetime
 import fitz 
 from pydub import AudioSegment
+from dotenv import load_dotenv
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
 from elevenlabs.client import ElevenLabs
@@ -16,6 +17,9 @@ from elevenlabs import play, stream, save
 from google.api_core.exceptions import BadRequest
 import threading
 from werkzeug.utils import secure_filename
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -31,8 +35,11 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['OUTPUT_FOLDER'] = OUTPUT_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  
 
-GEMINI_API_KEY = ""
-ELEVENLABS_API_KEY = ""
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+if not GEMINI_API_KEY or not ELEVENLABS_API_KEY:
+    raise ValueError("API keys not found. Please check your .env file")
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
