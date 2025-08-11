@@ -339,8 +339,9 @@
                 document.getElementById('statusText').textContent = data.status || 'Processing...';
                 
                 // Update UI when podcast is ready
-                if (data.status === 'Complete!') {
-                    clearInterval(pollingInterval);
+                if (data.status === 'Complete!' || data.status === 'Complete! (WAV format)') {
+                    const downloadSection = document.getElementById('downloadSection');
+                    const audioPlayer = document.querySelector('#downloadSection audio');
                     
                     // Store WAV data and filename if available
                     if (data.wav_data) {
@@ -351,64 +352,16 @@
                         document.getElementById('statusText').textContent = 'Podcast ready! Click below to download.';
                         document.getElementById('statusText').style.color = '#10b981';
                         
-                        const downloadBtn = document.getElementById('downloadBtn');
-                        downloadBtn.style.display = 'block';
-                        
-                        async function downloadPodcast() {
-                            const statusText = document.getElementById('statusText');
-                            
-                            try {
-                                if (!window.currentWavData) {
-                                    throw new Error('No audio data available for download');
-                                }
-                                
-                                statusText.textContent = 'Preparing download...';
-                                
-                                // Try to convert to MP3 if FFmpeg is supported
-                                if (isFFmpegSupported) {
-                                    try {
-                                        statusText.textContent = 'Converting to MP3...';
-                                        const mp3Blob = await convertWavToMp3(window.currentWavData);
-                                        const url = URL.createObjectURL(mp3Blob);
-                                        const a = document.createElement('a');
-                                        a.href = url;
-                                        a.download = window.currentOutputFilename || 'podcast.mp3';
-                                        document.body.appendChild(a);
-                                        a.click();
-                                        document.body.removeChild(a);
-                                        setTimeout(() => URL.revokeObjectURL(url), 100);
-                                        statusText.textContent = 'Download complete!';
-                                        return true;
-                                    } catch (mp3Error) {
-                                        console.warn('MP3 conversion failed, falling back to WAV:', mp3Error);
-                                        statusText.textContent = 'MP3 conversion failed, using WAV format...';
-                                        // Small delay to show the message
-                                        await new Promise(resolve => setTimeout(resolve, 1000));
-                                    }
-                                }
-                                
-                                // Fallback to WAV download
-                                statusText.textContent = 'Preparing WAV download...';
-                                const success = downloadWavData(window.currentWavData, window.currentOutputFilename || 'podcast.wav');
-                                if (success) {
-                                    statusText.textContent = 'Download complete!';
-                                    return true;
-                                } else {
-                                    throw new Error('Failed to prepare WAV download');
-                                }
-                                
-                            } catch (error) {
-                                console.error('Download error:', error);
-                                statusText.textContent = 'Error: ' + (error.message || 'Failed to prepare download');
-                                statusText.style.color = '#ef4444';
-                                return false;
-                            }
+                        // Show download section and preview WAV in the audio player
+                        if (downloadSection) downloadSection.classList.remove('hidden');
+                        try {
+                            const wavBytes = new Uint8Array(hexToBytes(window.currentWavData));
+                            const wavBlob = new Blob([wavBytes], { type: 'audio/wav' });
+                            const previewUrl = URL.createObjectURL(wavBlob);
+                            if (audioPlayer) audioPlayer.src = previewUrl;
+                        } catch (e) {
+                            console.warn('Failed to create WAV preview:', e);
                         }
-                        
-                        downloadBtn.onclick = async (e) => {
-                            e.preventDefault();
-                            await downloadPodcast();
-                        };
                         
                         // Auto-start download if FFmpeg isn't available
                         if (!isFFmpegSupported) {
@@ -419,16 +372,14 @@
                     else if (data.download_url) {
                         document.getElementById('statusText').textContent = 'Podcast ready! Click below to download.';
                         document.getElementById('statusText').style.color = '#10b981';
-                        
-                        const downloadBtn = document.getElementById('downloadBtn');
-                        downloadBtn.href = data.download_url;
-                        downloadBtn.download = data.filename || 'podcast.mp3';
-                        downloadBtn.style.display = 'block';
+                        if (downloadSection) downloadSection.classList.remove('hidden');
+                        if (audioPlayer) audioPlayer.src = data.download_url;
                     } else {
                         document.getElementById('statusText').textContent = 'Error: Could not prepare download';
                         document.getElementById('statusText').style.color = '#ef4444';
                     }
-                }        if (data.error) {
+                }
+                if (data.error) {
                     throw new Error(data.error);
                 }
                 
@@ -466,15 +417,53 @@
             }
         }
         
-        function downloadPodcast() {
-            const audioPlayer = document.querySelector('#downloadSection audio');
-            if (audioPlayer && audioPlayer.src) {
-                const a = document.createElement('a');
-                a.href = audioPlayer.src;
-                a.download = 'podcast.mp3';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
+        async function downloadPodcast() {
+            const statusText = document.getElementById('statusText');
+            try {
+                // Prefer in-memory WAV data path
+                if (window.currentWavData) {
+                    // Try MP3 conversion if supported
+                    if (isFFmpegSupported) {
+                        try {
+                            statusText.textContent = 'Converting to MP3...';
+                            const mp3Blob = await convertWavToMp3(window.currentWavData);
+                            const url = URL.createObjectURL(mp3Blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = (window.currentOutputFilename || 'podcast.mp3');
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            setTimeout(() => URL.revokeObjectURL(url), 100);
+                            statusText.textContent = 'Download complete!';
+                            return;
+                        } catch (e) {
+                            console.warn('MP3 conversion failed, falling back to WAV:', e);
+                        }
+                    }
+                    // Fallback to WAV download
+                    downloadWavData(window.currentWavData, window.currentOutputFilename || 'podcast.wav');
+                    statusText.textContent = 'Download complete!';
+                    return;
+                }
+                
+                // Fallback: download whatever is in the audio player (e.g., server URL)
+                const audioPlayer = document.querySelector('#downloadSection audio');
+                if (audioPlayer && audioPlayer.src) {
+                    const a = document.createElement('a');
+                    a.href = audioPlayer.src;
+                    a.download = 'podcast.mp3';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                } else {
+                    statusText.textContent = 'Error: No audio available for download';
+                    statusText.style.color = '#ef4444';
+                }
+            } catch (error) {
+                console.error('Download error:', error);
+                statusText.textContent = 'Error: ' + (error.message || 'Failed to prepare download');
+                statusText.style.color = '#ef4444';
             }
         }
     </script>

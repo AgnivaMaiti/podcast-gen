@@ -11,12 +11,8 @@ import fitz
 import sys
 import platform
 import subprocess
-import tempfile
 import shutil
 from pydub import AudioSegment
-
-# Check if running in Vercel
-IS_VERCEL = os.environ.get('VERCEL') == '1'
 from dotenv import load_dotenv
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -29,19 +25,21 @@ from werkzeug.utils import secure_filename
 # Load environment variables from .env file
 load_dotenv()
 
+# Check if running in Vercel
+IS_VERCEL = os.environ.get('VERCEL') == '1'
+
 app = Flask(__name__)
 CORS(app)
 
 # Configure FFmpeg path if on Windows and not in Vercel
 if platform.system() == 'Windows' and not IS_VERCEL:
-    import os
     ffmpeg_path = shutil.which('ffmpeg')
     if ffmpeg_path:
         os.environ["PATH"] += os.pathsep + os.path.dirname(ffmpeg_path)
 
 # Use /tmp for serverless environments
-UPLOAD_FOLDER = '/tmp/uploads' if os.environ.get('VERCEL') else 'uploads'
-OUTPUT_FOLDER = '/tmp/output' if os.environ.get('VERCEL') else 'output'
+UPLOAD_FOLDER = '/tmp/uploads' if IS_VERCEL else 'uploads'
+OUTPUT_FOLDER = '/tmp/output' if IS_VERCEL else 'output'
 ALLOWED_EXTENSIONS = {'pdf'}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -49,7 +47,7 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['OUTPUT_FOLDER'] = OUTPUT_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
@@ -77,9 +75,13 @@ def allowed_file(filename):
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def call_gemini(prompt: str) -> str:
-    response = model.generate_content(prompt)
-    text = response.text or ""
-    return text.strip()
+    try:
+        response = model.generate_content(prompt)
+        text = response.text or ""
+        return text.strip()
+    except Exception as e:
+        print(f"Error calling Gemini API: {str(e)}")
+        raise
 
 def split_on_sentence_boundary(text: str) -> tuple[str, str]:
     mid = len(text) // 2
@@ -305,7 +307,7 @@ def text_to_audio_elevenlabs(text: str, voice_id: str) -> AudioSegment:
             return AudioSegment.from_file(io.BytesIO(data), format="mp3")
         except Exception as e2:
             print(f"Audio generation failed: {e2}")
-            raise e2
+            raise Exception(f"Failed to generate audio: {str(e2)}")
 
 def process_podcast_creation(pdf_path: str, task_id: str):
     try:
@@ -324,7 +326,7 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         processing_status[task_id]['status'] = 'Converting to audio...'
         processing_status[task_id]['progress'] = 60
         
-        final_audio = AudioSegment.silent(duration=1000)
+        final_audio = AudioSegment.silent(duration=1000)  # Start with 1s of silence
         speakers_lower = set(name.lower() for name in speakers)
         
         script_lines = [clean_line(line) for line in script.split("\n") if clean_line(line)]
@@ -363,69 +365,96 @@ def process_podcast_creation(pdf_path: str, task_id: str):
         output_filename = f"StudySauce_Podcast_{timestamp}.mp3"
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         
+        final_audio.export(output_path, format="mp3")
+        
+        processing_status[task_id].update({
+            'status': 'Complete!',
+            'progress': 100,
+            'filename': output_filename,
+            'download_url': f'/download/{output_filename}'
+        })
+        
+    except Exception as e:
+        error_msg = f"Error in process_podcast_creation: {str(e)}"
+        print(f"\n!!! ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        
+        if task_id in processing_status:
+            processing_status[task_id].update({
+                'status': f'Error: {str(e)}',
+                'progress': 0,
+                'error': True,
+                'error_details': str(e),
+                'traceback': traceback.format_exc(),
+                'completed_at': datetime.now().isoformat()
+            })
+        raise Exception(error_msg)
+
+# In non-Vercel environments, also save the MP3 file locally
+if not IS_VERCEL:
+    def save_mp3_locally(final_audio, output_path, task_id, output_filename):
         try:
-            # Always generate WAV data for both Vercel and local development
-            # This ensures consistent behavior across environments
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Save as MP3
+            final_audio.export(output_path, format="mp3")
+            
+            # Also save WAV data for download endpoint
             with io.BytesIO() as wav_buffer:
-                # Export as WAV format (uncompressed for best quality)
                 final_audio.export(wav_buffer, format="wav")
                 wav_data = wav_buffer.getvalue()
             
-            # Store WAV data in memory for the download endpoint
-            processing_status[task_id]['wav_data'] = wav_data.hex()
-            processing_status[task_id]['filename'] = output_filename
+            # Update status
+            processing_status[task_id].update({
+                'status': 'Complete!',
+                'progress': 100,
+                'filename': output_filename,
+                'wav_data': wav_data.hex(),
+                'file_size': f"{os.path.getsize(output_path) / (1024 * 1024):.1f} MB",
+                'duration_seconds': len(final_audio) / 1000,
+                'completed_at': datetime.now().isoformat()
+            })
             
-            # In non-Vercel environments, also save the MP3 file locally
-            if not IS_VERCEL:
-                try:
-                    final_audio.export(output_path, format="mp3")
-                    processing_status[task_id]['download_url'] = f'/download/{output_filename}'
-                except Exception as mp3_error:
-                    print(f"MP3 export failed, falling back to WAV: {mp3_error}")
-                    # If MP3 export fails, fall back to WAV
-                    output_filename = output_filename.replace('.mp3', '.wav')
-                    output_path = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
-                    with open(output_path, 'wb') as f:
-                        f.write(wav_data)
-                    processing_status[task_id]['filename'] = output_filename
-                    processing_status[task_id]['download_url'] = f'/download/{output_filename}'
-            
-            # Update status to complete
-            processing_status[task_id]['status'] = 'Complete!'
-            processing_status[task_id]['progress'] = 100
+            return True
             
         except Exception as e:
-            error_msg = str(e)
-            print(f"Error finalizing podcast: {error_msg}")
-            if "ffmpeg" in error_msg.lower() or "encoder" in error_msg.lower():
-                error_msg = "Error during audio processing. The system will attempt to use WAV format instead."
+            print(f"Error saving MP3: {str(e)}")
+            return False
+    
+    def save_wav_locally(final_audio, output_path, task_id, output_filename):
+        try:
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Try to save as WAV as a last resort
-            try:
-                with io.BytesIO() as wav_buffer:
-                    final_audio.export(wav_buffer, format="wav")
-                    wav_data = wav_buffer.getvalue()
-                processing_status[task_id]['wav_data'] = wav_data.hex()
-                output_filename = f"StudySauce_Podcast_{timestamp}.wav"
-                processing_status[task_id]['filename'] = output_filename
-                processing_status[task_id]['status'] = 'Complete! (WAV format)'
-                processing_status[task_id]['progress'] = 100
-                print("Successfully saved as WAV after initial error")
-            except Exception as wav_error:
-                print(f"WAV export also failed: {wav_error}")
-                processing_status[task_id]['status'] = f'Error: {error_msg}'
-                processing_status[task_id]['progress'] = 0
-                processing_status[task_id]['error'] = True
-        
-        processing_status[task_id]['status'] = 'Complete!'
-        processing_status[task_id]['progress'] = 100
-        processing_status[task_id]['download_url'] = f'/download/{output_filename}'
-        processing_status[task_id]['filename'] = output_filename
-        
-    except Exception as e:
-        processing_status[task_id]['status'] = f'Error: {str(e)}'
-        processing_status[task_id]['progress'] = 0
-        processing_status[task_id]['error'] = True
+            # Save as WAV
+            final_audio.export(output_path, format="wav")
+            
+            # Update status for WAV
+            processing_status[task_id].update({
+                'status': 'Complete! (WAV format)',
+                'progress': 100,
+                'filename': output_filename,
+                'file_size': f"{os.path.getsize(output_path) / (1024 * 1024):.1f} MB",
+                'duration_seconds': len(final_audio) / 1000,
+                'completed_at': datetime.now().isoformat()
+            })
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error saving WAV: {str(e)}")
+            return False
+else:
+    # For Vercel environment, use these placeholder functions
+    def save_mp3_locally(*args, **kwargs):
+        print("Running in Vercel environment - MP3 save not available")
+        return False
+    
+    def save_wav_locally(*args, **kwargs):
+        print("Running in Vercel environment - WAV save not available")
+        return False
 
 @app.route('/')
 def splash():
@@ -437,65 +466,137 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    if 'pdf' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-    
-    file = request.files['pdf']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-    
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{filename}"
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
+    try:
+        print("\n=== Upload Request ===")
+        print(f"Form data: {request.form}")
+        print(f"Files: {request.files}")
         
-        num_hosts = int(request.form.get('num_hosts', 2))
-        num_guests = int(request.form.get('num_guests', 1))
-        podcast_length = int(request.form.get('podcast_length', 10))  # in minutes
-        selected_hosts = request.form.getlist('selected_hosts[]')
+        if 'pdf' not in request.files:
+            error_msg = 'No file uploaded'
+            print(f"Error: {error_msg}")
+            return jsonify({'error': error_msg, 'details': 'No file part in the request'}), 400
         
-        if num_hosts < 1 or num_hosts > 4:
-            return jsonify({'error': 'Number of hosts must be between 1 and 4'}), 400
-        if num_guests < 0 or num_guests > 3:
-            return jsonify({'error': 'Number of guests must be between 0 and 3'}), 400
-        if podcast_length < 3 or podcast_length > 15:
-            return jsonify({'error': 'Podcast length must be between 3 and 15 minutes'}), 400
+        file = request.files['pdf']
+        if file.filename == '':
+            error_msg = 'No file selected'
+            print(f"Error: {error_msg}")
+            return jsonify({'error': error_msg}), 400
         
-        task_id = f"task_{timestamp}_{random.randint(1000, 9999)}"
+        if not file or not allowed_file(file.filename):
+            error_msg = 'Invalid file type. Please upload a PDF.'
+            print(f"Error: {error_msg}")
+            return jsonify({'error': error_msg, 'details': f'File type: {file.content_type}'}), 400
         
-        processing_status[task_id] = {
-            'status': 'Starting...',
-            'progress': 0,
-            'error': False,
-            'num_hosts': num_hosts,
-            'num_guests': num_guests,
-            'podcast_length': podcast_length,
-            'selected_hosts': selected_hosts
-        }
-        
-        thread = threading.Thread(target=process_podcast_creation, args=(filepath, task_id))
-        thread.daemon = True
-        thread.start()
-        
-        return jsonify({'task_id': task_id})
-    
-    return jsonify({'error': 'Invalid file type. Please upload a PDF.'}), 400
+        try:
+            # Ensure upload directory exists
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            
+            # Save the file
+            filename = secure_filename(file.filename)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{filename}"
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            print(f"File saved to: {filepath}")
+            
+            # Get form data with error handling
+            try:
+                num_hosts = int(request.form.get('num_hosts', 2))
+                num_guests = int(request.form.get('num_guests', 1))
+                podcast_length = int(request.form.get('podcast_length', 10))
+                selected_hosts = request.form.getlist('selected_hosts[]')
+                
+                print(f"Form data - Hosts: {num_hosts}, Guests: {num_guests}, Length: {podcast_length}min")
+                print(f"Selected hosts: {selected_hosts}")
+                
+                # Validate inputs
+                if num_hosts < 1 or num_hosts > 4:
+                    raise ValueError('Number of hosts must be between 1 and 4')
+                if num_guests < 0 or num_guests > 3:
+                    raise ValueError('Number of guests must be between 0 and 3')
+                if podcast_length < 3 or podcast_length > 15:
+                    raise ValueError('Podcast length must be between 3 and 15 minutes')
+                
+            except ValueError as ve:
+                error_msg = str(ve)
+                print(f"Validation error: {error_msg}")
+                return jsonify({'error': error_msg}), 400
+            
+            # Create task
+            task_id = f"task_{timestamp}_{random.randint(1000, 9999)}"
+            
+            processing_status[task_id] = {
+                'status': 'Starting...',
+                'progress': 0,
+                'error': False,
+                'num_hosts': num_hosts,
+                'num_guests': num_guests,
+                'podcast_length': podcast_length,
+                'selected_hosts': selected_hosts,
+                'start_time': time.time()
+            }
+            
+            print(f"Starting processing task: {task_id}")
+            
+            # Start processing in a separate thread
+            thread = threading.Thread(
+                target=process_podcast_creation, 
+                args=(filepath, task_id),
+                daemon=True
+            )
+            thread.start()
+            
+            return jsonify({
+                'task_id': task_id,
+                'message': 'Processing started',
+                'status_url': f'/status/{task_id}'
+            })
+            
+        except Exception as e:
+            error_msg = f'Error processing file: {str(e)}'
+            print(f"Processing error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'error': 'Failed to process file',
+                'details': str(e),
+                'traceback': traceback.format_exc()
+            }), 500
+            
+    except Exception as e:
+        error_msg = f'Unexpected error: {str(e)}'
+        print(f"Unexpected error: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'An unexpected error occurred',
+            'details': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
 
 @app.route('/status/<task_id>')
 def get_status(task_id):
-    print(f"\n=== Status Request ===")
-    print(f"Task ID: {task_id}")
-    print(f"Available tasks: {list(processing_status.keys())}")
-    
-    if task_id in processing_status:
-        status = processing_status[task_id]
-        print(f"Status: {status}")
-        return jsonify(status)
-    else:
-        print("Task not found")
-        return jsonify({'error': 'Task not found'}), 404
+    try:
+        if task_id not in processing_status:
+            return jsonify({'error': 'Task not found'}), 404
+            
+        status_data = processing_status[task_id].copy()
+        
+        # Ensure we have all required fields
+        if 'status' not in status_data:
+            status_data['status'] = 'Processing...'
+        if 'progress' not in status_data:
+            status_data['progress'] = 0
+            
+        # If the task is complete, include download URL if available
+        if status_data.get('status') == 'Complete!' and 'filename' in status_data:
+            status_data['download_url'] = f'/download/{status_data["filename"]}'
+            
+        return jsonify(status_data)
+        
+    except Exception as e:
+        print(f"Error in get_status: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/download/<identifier>', methods=['GET'])
 def download_file(identifier):
@@ -508,10 +609,12 @@ def download_file(identifier):
             # If we have WAV data in memory, use that instead of the file
             if 'wav_data' in processing_status[identifier]:
                 print(f"Serving WAV data from memory for task {identifier}")
-                wav_data = processing_status[identifier]['wav_data']
+                wav_hex = processing_status[identifier]['wav_data']  # already hex-encoded
+                # Ensure a .wav filename for client download
+                wav_filename = filename.replace('.mp3', '.wav') if filename.lower().endswith('.mp3') else filename
                 return jsonify({
-                    'wav_data': wav_data.hex(),
-                    'filename': filename.replace('.mp3', '.wav')
+                    'wav_data': wav_hex,
+                    'filename': wav_filename
                 })
         else:
             # Direct file access by filename
