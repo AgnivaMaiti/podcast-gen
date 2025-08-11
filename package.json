@@ -4,7 +4,8 @@
   "description": "Convert PDFs to podcasts using AI",
   "main": "app.py",
   "scripts": {
-    "start": "python app.py"
+    "start": "python app.py",
+    "vercel-build": "pip install -r requirements.txt && python -c \"import nltk; nltk.download('punkt')\""
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
@@ -12,5 +13,9 @@
   },
   "engines": {
     "node": ">=14.0.0"
-  }
+  },
+  "cacheDirectories": [
+    "node_modules",
+    ".python_packages"
+  ]
 }
