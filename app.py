@@ -12,50 +12,77 @@ import sys
 import platform
 import subprocess
 import shutil
-import pydub
 import warnings
+import wave
+import io
 
 # Suppress FFmpeg warnings
 warnings.filterwarnings("ignore", message="Couldn't find ffprobe or avprobe")
 
-# Try to import AudioSegment with FFmpeg fallback
-try:
-    AudioSegment = pydub.AudioSegment
-    # Test FFmpeg availability
-    test_audio = AudioSegment.silent(duration=100)
-    FFMPEG_AVAILABLE = True
-except Exception as e:
-    print(f"FFmpeg not available, using basic audio processing: {str(e)}")
-    FFMPEG_AVAILABLE = False
-    
-    # Define a simplified AudioSegment fallback
-    class SimpleAudioSegment:
-        def __init__(self, data=None, *args, **kwargs):
-            self.data = data or b''
-            self.frame_rate = 44100
-            self.channels = 2
-            self.sample_width = 2
-            
-        @classmethod
-        def from_file(cls, file, format=None):
+# Check if FFmpeg is available
+FFMPEG_AVAILABLE = shutil.which('ffmpeg') is not None or shutil.which('ffmpeg.exe') is not None
+
+# Define a simple audio segment class for basic audio handling
+class SimpleAudioSegment:
+    def __init__(self, data=None, *args, **kwargs):
+        self.data = data or b''
+        self.frame_rate = 44100
+        self.channels = 2
+        self.sample_width = 2  # 16-bit
+        
+    @classmethod
+    def from_file(cls, file, format=None):
+        if isinstance(file, str):
             with open(file, 'rb') as f:
                 return cls(f.read())
-                
-        def export(self, output_path, format='wav'):
-            with open(output_path, 'wb') as f:
-                f.write(self.data)
-                
-        def __add__(self, other):
-            if isinstance(other, SimpleAudioSegment):
-                return SimpleAudioSegment(self.data + other.data)
-            return self
+        elif hasattr(file, 'read'):
+            return cls(file.read())
+        else:
+            raise ValueError("Invalid file object")
             
-        @classmethod
-        def silent(cls, duration=1000, *args, **kwargs):
-            # Return a silent audio segment of the specified duration in ms
-            return cls(b'\x00' * (duration * 44))  # Rough approximation for 44.1kHz stereo
+    def export(self, output_path, format='wav'):
+        with open(output_path, 'wb') as f:
+            if format.lower() == 'wav':
+                self._export_wav(f)
+            else:
+                # For non-WAV formats, just write the raw data
+                f.write(self.data)
     
-    AudioSegment = SimpleAudioSegment
+    def _export_wav(self, file_obj):
+        """Export to WAV format"""
+        with wave.open(file_obj, 'wb') as wf:
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(self.sample_width)
+            wf.setframerate(self.frame_rate)
+            wf.writeframes(self.data)
+                
+    def __add__(self, other):
+        if isinstance(other, SimpleAudioSegment):
+            return SimpleAudioSegment(self.data + other.data)
+        return self
+        
+    @classmethod
+    def silent(cls, duration=1000, *args, **kwargs):
+        # Generate silent audio data (2 channels, 16-bit, 44100 Hz)
+        sample_rate = 44100
+        channels = 2
+        sample_width = 2  # 16-bit
+        
+        # Calculate number of frames needed for the duration (in milliseconds)
+        num_frames = int(duration * sample_rate / 1000)
+        
+        # Create silent audio data (0 for silence in 16-bit PCM)
+        silent_data = b'\x00' * (num_frames * channels * sample_width)
+        
+        segment = cls(silent_data)
+        segment.frame_rate = sample_rate
+        segment.channels = channels
+        segment.sample_width = sample_width
+        return segment
+
+# Use our simple audio segment implementation
+AudioSegment = SimpleAudioSegment
+
 from dotenv import load_dotenv
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -677,58 +704,78 @@ def download_file(identifier):
             # If we have WAV data in memory, use that instead of the file
             if 'wav_data' in processing_status[identifier]:
                 print(f"Serving WAV data from memory for task {identifier}")
-                wav_hex = processing_status[identifier]['wav_data']  # already hex-encoded
-                # Ensure a .wav filename for client download
-                wav_filename = filename.replace('.mp3', '.wav') if filename.lower().endswith('.mp3') else filename
+                wav_hex = processing_status[identifier]['wav_data']
+                wav_data = bytes.fromhex(wav_hex)
+                return send_file(
+                    io.BytesIO(wav_data),
+                    as_attachment=True,
+                    download_name=filename.replace('.mp3', '.wav') if filename.lower().endswith('.mp3') else filename,
+                    mimetype='audio/wav'
+                )
+            
+            # If we have a file on disk, serve it
+            if os.path.exists(filepath):
+                # Determine MIME type based on file extension
+                if filename.lower().endswith('.mp3'):
+                    mimetype = 'audio/mpeg'
+                elif filename.lower().endswith('.wav'):
+                    mimetype = 'audio/wav'
+                else:
+                    mimetype = 'application/octet-stream'
+                
+                return send_file(
+                    filepath,
+                    as_attachment=True,
+                    download_name=filename,
+                    mimetype=mimetype
+                )
         
-        # Look for the file with the given identifier in the filename
+        # If we get here, either no WAV data in memory or not a WAV file
+        # Look for the file with the given identifier in the output folder
+        output_dir = app.config['OUTPUT_FOLDER']
         for file in os.listdir(output_dir):
             if identifier in file:
                 filename = file
-                break
+                filepath = os.path.join(output_dir, filename)
                 
-        if not filename:
-            return jsonify({'error': 'File not found'}), 404
-            
-        filepath = os.path.join(output_dir, filename)
-        
-        # Determine MIME type based on file extension
-        if filename.lower().endswith('.mp3'):
-            mimetype = 'audio/mpeg'
-        elif filename.lower().endswith('.wav'):
-            mimetype = 'audio/wav'
-        else:
-            mimetype = 'application/octet-stream'  # Fallback MIME type
-        
-        # If FFmpeg is not available and the file is MP3, try to convert from WAV
-        if not FFMPEG_AVAILABLE and filename.lower().endswith('.mp3'):
-            try:
-                # Look for WAV version of the file
-                wav_filename = os.path.splitext(filename)[0] + '.wav'
-                wav_path = os.path.join(output_dir, wav_filename)
+                # Determine MIME type based on file extension
+                if filename.lower().endswith('.mp3'):
+                    mimetype = 'audio/mpeg'
+                elif filename.lower().endswith('.wav'):
+                    mimetype = 'audio/wav'
+                else:
+                    mimetype = 'application/octet-stream'  # Fallback MIME type
                 
-                if os.path.exists(wav_path):
-                    # Serve the WAV version instead
-                    return send_file(
-                        wav_path,
-                        as_attachment=True,
-                        download_name=wav_filename,
-                        mimetype='audio/wav'
-                    )
-            except Exception as e:
-                print(f"Error serving WAV fallback: {str(e)}")
-                # Continue with the original file if WAV conversion fails
+                # If FFmpeg is not available and the file is MP3, try to find WAV version
+                if not FFMPEG_AVAILABLE and filename.lower().endswith('.mp3'):
+                    # Look for WAV version of the file
+                    wav_filename = os.path.splitext(filename)[0] + '.wav'
+                    wav_path = os.path.join(output_dir, wav_filename)
+                    
+                    if os.path.exists(wav_path):
+                        # Serve the WAV version instead
+                        return send_file(
+                            wav_path,
+                            as_attachment=True,
+                            download_name=wav_filename,
+                            mimetype='audio/wav'
+                        )
+                
+                # Serve the file as is
+                return send_file(
+                    filepath,
+                    as_attachment=True,
+                    download_name=filename,
+                    mimetype=mimetype
+                )
         
-        # Return the file for download
-        return send_file(
-            filepath,
-            as_attachment=True,
-            download_name=filename,
-            mimetype=mimetype
-        )
+        # If we get here, file was not found
+        return jsonify({'error': 'File not found'}), 404
         
     except Exception as e:
         print(f"Error downloading file: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # Create necessary directories
