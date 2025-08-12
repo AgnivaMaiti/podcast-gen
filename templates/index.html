@@ -154,20 +154,20 @@
             const formData = new FormData();
             formData.append('pdf', file);
             
-            // Get selected hosts
-            const selectedHosts = [];
+            // Get selected host names
+            const selectedHostNames = [];
             document.querySelectorAll('input[name="selectedHosts"]:checked').forEach(checkbox => {
-                selectedHosts.push({
-                    id: checkbox.value,
-                    voice: checkbox.dataset.voice,
-                    name: checkbox.nextElementSibling.textContent
-                });
+                selectedHostNames.push(checkbox.nextElementSibling.textContent);
             });
             
             // Add podcast settings
             formData.append('num_hosts', document.getElementById('numHosts').value);
             formData.append('podcast_length', document.getElementById('podcastLength').value);
-            formData.append('selected_hosts', JSON.stringify(selectedHosts));
+            
+            // Append each host name so backend can read it with getlist
+            selectedHostNames.forEach(name => {
+                formData.append('selected_hosts[]', name);
+            });
             
             // Show progress section
             document.getElementById('progressSection').classList.remove('hidden');

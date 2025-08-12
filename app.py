@@ -15,6 +15,7 @@ import shutil
 import warnings
 import wave
 import io
+import array
 
 # Suppress FFmpeg warnings
 warnings.filterwarnings("ignore", message="Couldn't find ffprobe or avprobe")
