@@ -7,4 +7,4 @@ elevenlabs==1.8.0
 Werkzeug==2.3.7
 python-dotenv==1.0.0
 gunicorn==21.2.0
-simpleaudio==1.0.4
+pydub==0.25.1

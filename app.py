@@ -29,53 +29,71 @@ class SimpleAudioSegment:
         self.frame_rate = 44100
         self.channels = 2
         self.sample_width = 2  # 16-bit
-        
+        self._dtype = 'h'  # short (16-bit) samples
+
     @classmethod
     def from_file(cls, file, format=None):
         if isinstance(file, str):
             with open(file, 'rb') as f:
-                return cls(f.read())
-        elif hasattr(file, 'read'):
-            return cls(file.read())
+                data = f.read()
         else:
-            raise ValueError("Invalid file object")
-            
-    def export(self, output_path, format='wav'):
-        with open(output_path, 'wb') as f:
-            if format.lower() == 'wav':
-                self._export_wav(f)
-            else:
-                # For non-WAV formats, just write the raw data
-                f.write(self.data)
-    
-    def _export_wav(self, file_obj):
-        """Export to WAV format"""
-        with wave.open(file_obj, 'wb') as wf:
-            wf.setnchannels(self.channels)
-            wf.setsampwidth(self.sample_width)
-            wf.setframerate(self.frame_rate)
-            wf.writeframes(self.data)
-                
-    def __add__(self, other):
-        if isinstance(other, SimpleAudioSegment):
-            return SimpleAudioSegment(self.data + other.data)
-        return self
+            data = file.read()
         
+        # Create a simple segment with the raw data
+        segment = cls(data)
+        
+        # Try to parse WAV header if it exists
+        if len(data) > 44 and data[:4] == b'RIFF':
+            try:
+                with io.BytesIO(data) as f:
+                    with wave.open(f, 'rb') as wav:
+                        segment.channels = wav.getnchannels()
+                        segment.sample_width = wav.getsampwidth()
+                        segment.frame_rate = wav.getframerate()
+                        segment._dtype = 'h' if segment.sample_width == 2 else 'B'
+            except:
+                pass
+                
+        return segment
+
+    def export(self, output_path, format='wav'):
+        with wave.open(output_path, 'wb') as wav_file:
+            wav_file.setnchannels(self.channels)
+            wav_file.setsampwidth(self.sample_width)
+            wav_file.setframerate(self.frame_rate)
+            wav_file.writeframes(self.data)
+
+    def _export_wav(self, file_obj):
+        with wave.open(file_obj, 'wb') as wav_file:
+            wav_file.setnchannels(self.channels)
+            wav_file.setsampwidth(self.sample_width)
+            wav_file.setframerate(self.frame_rate)
+            wav_file.writeframes(self.data)
+
+    def __add__(self, other):
+        # Simple concatenation of audio data
+        new_data = self.data + other.data
+        new_segment = SimpleAudioSegment(new_data)
+        new_segment.frame_rate = self.frame_rate
+        new_segment.channels = self.channels
+        new_segment.sample_width = self.sample_width
+        return new_segment
+
     @classmethod
     def silent(cls, duration=1000, *args, **kwargs):
-        # Generate silent audio data (2 channels, 16-bit, 44100 Hz)
-        sample_rate = 44100
+        # Generate silent audio data
+        frame_rate = 44100
         channels = 2
-        sample_width = 2  # 16-bit
+        sample_width = 2
+        samples_per_ms = frame_rate // 1000
+        num_samples = int(duration * samples_per_ms)
         
-        # Calculate number of frames needed for the duration (in milliseconds)
-        num_frames = int(duration * sample_rate / 1000)
+        # Create silent audio data
+        silent_data = array.array('h', [0] * num_samples * channels)
         
-        # Create silent audio data (0 for silence in 16-bit PCM)
-        silent_data = b'\x00' * (num_frames * channels * sample_width)
-        
-        segment = cls(silent_data)
-        segment.frame_rate = sample_rate
+        # Create a new audio segment with the silent data
+        segment = cls(silent_data.tobytes())
+        segment.frame_rate = frame_rate
         segment.channels = channels
         segment.sample_width = sample_width
         return segment
